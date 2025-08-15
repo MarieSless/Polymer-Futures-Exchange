@@ -29,6 +29,9 @@
 (define-constant MAINTENANCE_MARGIN u125) ;; 12.5%
 (define-constant MAX_POSITION_SIZE u1000000) ;; Maximum position size
 (define-constant MIN_COLLATERAL u100) ;; Minimum collateral amount
+(define-constant MAX_PRICE u1000000000) ;; Maximum price (1 billion)
+(define-constant MAX_EXPIRY_BLOCKS u52560) ;; ~1 year in blocks
+(define-constant ZERO_ADDRESS 'SP000000000000000000002Q6VF78) ;; Standard zero address
 
 ;; --- Data Maps and Variables ---
 (define-data-var last-contract-id uint u0)
@@ -60,6 +63,8 @@
 (define-public (set-oracle-principal (new-oracle principal))
   (begin
     (asserts! (is-eq tx-sender CONTRACT_OWNER) ERR_UNAUTHORIZED)
+    ;; Validate that the new oracle is not the zero address
+    (asserts! (not (is-eq new-oracle ZERO_ADDRESS)) ERR_INVALID_PRICE)
     (var-set oracle-principal (some new-oracle))
     (ok true)
   )
@@ -69,6 +74,8 @@
 (define-public (set-collateral-token (token-contract principal))
   (begin
     (asserts! (is-eq tx-sender CONTRACT_OWNER) ERR_UNAUTHORIZED)
+    ;; Validate that the token contract is not the zero address
+    (asserts! (not (is-eq token-contract ZERO_ADDRESS)) ERR_INVALID_PRICE)
     (var-set collateral-token (some token-contract))
     (ok true)
   )
@@ -119,6 +126,10 @@
   (let ((oracle (unwrap! (var-get oracle-principal) ERR_UNAUTHORIZED)))
     (asserts! (is-eq tx-sender oracle) ERR_UNAUTHORIZED)
     (asserts! (> new-price u0) ERR_INVALID_PRICE)
+    ;; Validate polymer type is not empty
+    (asserts! (> (len polymer-type) u0) ERR_INVALID_PRICE)
+    ;; Set a reasonable price range (between 1 and 1 billion)
+    (asserts! (<= new-price MAX_PRICE) ERR_INVALID_PRICE)
     (map-set polymer-prices polymer-type new-price)
     (ok true)
   )
@@ -129,6 +140,11 @@
   (begin
     (asserts! (is-eq tx-sender CONTRACT_OWNER) ERR_UNAUTHORIZED)
     (asserts! (> expiry-in-blocks u0) ERR_INVALID_PRICE)
+    ;; Validate polymer type is not empty and has reasonable length
+    (asserts! (> (len polymer-type) u0) ERR_INVALID_PRICE)
+    (asserts! (<= (len polymer-type) u16) ERR_INVALID_PRICE)
+    ;; Reasonable expiry range (1 to 52560 blocks ~ 1 year)
+    (asserts! (<= expiry-in-blocks MAX_EXPIRY_BLOCKS) ERR_INVALID_PRICE)
     (let ((contract-id (+ u1 (var-get last-contract-id))))
       (map-set futures-contracts contract-id {
         id: contract-id,
@@ -179,6 +195,12 @@
       (position (unwrap! (map-get? user-positions { user: tx-sender, contract-id: contract-id }) ERR_POSITION_NOT_FOUND))
       (current-price (unwrap! (map-get? polymer-prices (get polymer-type contract)) ERR_INVALID_PRICE))
     )
+    ;; Validate contract ID is within reasonable bounds
+    (asserts! (> contract-id u0) ERR_CONTRACT_NOT_FOUND)
+    (asserts! (<= contract-id (var-get last-contract-id)) ERR_CONTRACT_NOT_FOUND)
+    ;; Validate token contract is not zero address
+    (asserts! (not (is-eq (contract-of collateral-token-contract) ZERO_ADDRESS)) ERR_TOKEN_TRANSFER_FAILED)
+
     (let
       (
         (pnl-amount (calculate-pnl (get position-type position) (get entry-price position) current-price (get position-size position)))
@@ -201,6 +223,14 @@
       (current-price (unwrap! (map-get? polymer-prices (get polymer-type contract)) ERR_INVALID_PRICE))
       (liquidation-price (get-liquidation-price position))
     )
+    ;; Validate inputs
+    (asserts! (not (is-eq user ZERO_ADDRESS)) ERR_POSITION_NOT_FOUND)
+    (asserts! (> contract-id u0) ERR_CONTRACT_NOT_FOUND)
+    (asserts! (<= contract-id (var-get last-contract-id)) ERR_CONTRACT_NOT_FOUND)
+    (asserts! (not (is-eq (contract-of collateral-token-contract) ZERO_ADDRESS)) ERR_TOKEN_TRANSFER_FAILED)
+    ;; Cannot liquidate own position
+    (asserts! (not (is-eq user tx-sender)) ERR_CANNOT_LIQUIDATE)
+
     (asserts!
       (if (is-eq (get position-type position) "long")
         (<= current-price liquidation-price)
@@ -221,6 +251,10 @@
 (define-public (deactivate-contract (contract-id uint))
   (begin
     (asserts! (is-eq tx-sender CONTRACT_OWNER) ERR_UNAUTHORIZED)
+    ;; Validate contract ID is within reasonable bounds
+    (asserts! (> contract-id u0) ERR_CONTRACT_NOT_FOUND)
+    (asserts! (<= contract-id (var-get last-contract-id)) ERR_CONTRACT_NOT_FOUND)
+
     (match (map-get? futures-contracts contract-id)
       contract-data (begin
         (map-set futures-contracts contract-id (merge contract-data { is-active: false }))
